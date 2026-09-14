@@ -4,20 +4,41 @@ import subprocess
 import os
 import json
 import shlex
+import sys
 
 app = FastAPI(title="Last30Days Skill Bridge API")
 
 REPO_URL = "https://github.com/mvanhorn/last30days-skill.git"
-SKILL_DIR = "/data/skills/last30days-skill"
-SKILL_PATH = f"{SKILL_DIR}/skills/last30days/scripts/last30days.py"
-SAVE_DIR = "/data/last30days"
+DATA_DIR = os.environ.get("PUSHSKILL_DATA_DIR", "/tmp/pushskill")
+SKILL_DIR = os.path.join(DATA_DIR, "skills", "last30days-skill")
+SKILL_PATH = os.path.join(SKILL_DIR, "skills", "last30days", "scripts", "last30days.py")
+SAVE_DIR = os.path.join(DATA_DIR, "last30days")
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "python": sys.version.split()[0]}
 
 def setup_environment():
     """Chuẩn bị thư mục và clone repository nếu chưa có."""
-    os.makedirs(SAVE_DIR, exist_ok=True)
+    try:
+        os.makedirs(SAVE_DIR, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail=f"Cannot create data directory {SAVE_DIR}: {exc}") from exc
     if not os.path.exists(SKILL_PATH):
-        os.makedirs(os.path.dirname(SKILL_DIR), exist_ok=True)
-        subprocess.run(["git", "clone", "--depth", "1", REPO_URL, SKILL_DIR], check=True)
+        try:
+            os.makedirs(os.path.dirname(SKILL_DIR), exist_ok=True)
+            result = subprocess.run(
+                ["git", "clone", "--depth", "1", REPO_URL, SKILL_DIR],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=503, detail="git is not installed in the Render runtime") from exc
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or "git clone failed").strip()
+            raise HTTPException(status_code=503, detail=f"Cannot clone skill repository: {detail}") from exc
 
 # --- REQUEST MODELS ---
 class ResearchRequest(BaseModel):
@@ -48,7 +69,7 @@ def run_research(req: ResearchRequest):
     if sys.version_info < (3, 12):
         raise HTTPException(status_code=500, detail="Python >= 3.12 required on server")
 
-    base_cmd = f"python3 {SKILL_PATH} {shlex.quote(req.topic)} --emit=compact --save-dir={SAVE_DIR} --save-suffix=v3 --auto-resolve"
+    base_cmd = f"{shlex.quote(sys.executable)} {shlex.quote(SKILL_PATH)} {shlex.quote(req.topic)} --emit=compact --save-dir={shlex.quote(SAVE_DIR)} --save-suffix=v3 --auto-resolve"
     
     if req.queryPlanJson and req.queryPlanJson not in ["null", '""', ""]:
         plan_file = "/tmp/last30days_query_plan.json"
@@ -85,56 +106,57 @@ def run_research(req: ResearchRequest):
     try:
         p = subprocess.run(full_cmd, shell=True, text=True, capture_output=True)
         if p.returncode != 0:
-            raise HTTPException(status_code=500, detail=p.stderr)
+            detail = (p.stderr or p.stdout or "skill command failed").strip()
+            raise HTTPException(status_code=502, detail=detail)
         return {"stdout": p.stdout}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Research execution failed: {exc}") from exc
 
 # 2. Match chuẩn logic case $ACTION trong last30days_discovery
 @app.post("/discovery")
 def run_discovery(req: DiscoveryRequest):
+    if req.action not in {"nominate", "research", "finalize"}:
+        raise HTTPException(status_code=400, detail="action must be nominate, research, or finalize")
     setup_environment()
     topic_str = shlex.quote(req.topic or "")
     
     if req.action == "nominate":
-        cmd = f'python3 "{SKILL_PATH}" --discover --nominate-only {topic_str} --save-dir={SAVE_DIR}'
+        cmd = f'{shlex.quote(sys.executable)} {shlex.quote(SKILL_PATH)} --discover --nominate-only {topic_str} --save-dir={shlex.quote(SAVE_DIR)}'
     elif req.action == "research":
         j_file = "/tmp/last30days_judgments.json"
         with open(j_file, "w") as f:
             f.write(req.judgmentsJson or "")
-        cmd = f'python3 "{SKILL_PATH}" --discover --judgments {j_file} {topic_str} --save-dir={SAVE_DIR}'
+        cmd = f'{shlex.quote(sys.executable)} {shlex.quote(SKILL_PATH)} --discover --judgments {shlex.quote(j_file)} {topic_str} --save-dir={shlex.quote(SAVE_DIR)}'
     elif req.action == "finalize":
         a_file = "/tmp/last30days_angles.json"
         with open(a_file, "w") as f:
             f.write(req.anglesJson or "")
-        cmd = f'python3 "{SKILL_PATH}" --discover --finalize --angles {a_file} {topic_str} --save-dir={SAVE_DIR}'
-    else:
-        raise HTTPException(status_code=400, detail="action must be nominate, research, or finalize")
-
+        cmd = f'{shlex.quote(sys.executable)} {shlex.quote(SKILL_PATH)} --discover --finalize --angles {shlex.quote(a_file)} {topic_str} --save-dir={shlex.quote(SAVE_DIR)}'
     p = subprocess.run(cmd, shell=True, text=True, capture_output=True)
     if p.returncode != 0:
-        raise HTTPException(status_code=500, detail=p.stderr)
+        raise HTTPException(status_code=502, detail=(p.stderr or p.stdout or "skill command failed").strip())
     return {"stdout": p.stdout}
 
 # 3. Match chuẩn logic case $OP trong last30days_library
 @app.post("/library")
 def run_library(req: LibraryRequest):
+    if req.operation not in {"search", "feed", "queue-list", "queue-cover"}:
+        raise HTTPException(status_code=400, detail="operation must be search, feed, queue-list, or queue-cover")
     setup_environment()
     topic_str = shlex.quote(req.topic or "")
     query_str = shlex.quote(req.query or "")
 
     if req.operation == "search":
-        cmd = f'python3 "{SKILL_PATH}" library search {query_str} --save-dir={SAVE_DIR}'
+        cmd = f'{shlex.quote(sys.executable)} {shlex.quote(SKILL_PATH)} library search {query_str} --save-dir={shlex.quote(SAVE_DIR)}'
     elif req.operation == "feed":
-        cmd = f'python3 "{SKILL_PATH}" library feed --save-dir={SAVE_DIR}'
+        cmd = f'{shlex.quote(sys.executable)} {shlex.quote(SKILL_PATH)} library feed --save-dir={shlex.quote(SAVE_DIR)}'
     elif req.operation == "queue-list":
-        cmd = f'python3 "{SKILL_PATH}" queue list --save-dir={SAVE_DIR}'
+        cmd = f'{shlex.quote(sys.executable)} {shlex.quote(SKILL_PATH)} queue list --save-dir={shlex.quote(SAVE_DIR)}'
     elif req.operation == "queue-cover":
-        cmd = f'python3 "{SKILL_PATH}" queue cover {topic_str} --save-dir={SAVE_DIR}'
-    else:
-        raise HTTPException(status_code=400, detail="operation must be search, feed, queue-list, or queue-cover")
-
+        cmd = f'{shlex.quote(sys.executable)} {shlex.quote(SKILL_PATH)} queue cover {topic_str} --save-dir={shlex.quote(SAVE_DIR)}'
     p = subprocess.run(cmd, shell=True, text=True, capture_output=True)
     if p.returncode != 0:
-        raise HTTPException(status_code=500, detail=p.stderr)
+        raise HTTPException(status_code=502, detail=(p.stderr or p.stdout or "skill command failed").strip())
     return {"stdout": p.stdout}
