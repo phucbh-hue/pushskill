@@ -1,5 +1,3 @@
 fastapi
 uvicorn
 pydantic
-gitpython
-yt-dlp
