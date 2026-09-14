@@ -57,6 +57,11 @@ class LibraryRequest(BaseModel):
     topic: str | None = ""
     query: str | None = ""
 
+class CliRequest(BaseModel):
+    command: str  # doctor, diagnose, preflight, drill, library-*, queue-*
+    topic: str | None = ""
+    optionsJson: str | None = None
+
 # --- ENDPOINTS ---
 
 # 1. Match chuẩn logic của last30days_research
@@ -162,3 +167,86 @@ def run_library(req: LibraryRequest):
     if p.returncode != 0:
         raise HTTPException(status_code=502, detail=(p.stderr or p.stdout or "skill command failed").strip())
     return {"stdout": p.stdout}
+
+# 4. Allowlisted access to additional last30days CLI commands.
+@app.post("/cli")
+def run_cli(req: CliRequest):
+    allowed_commands = {
+        "doctor", "diagnose", "preflight", "drill",
+        "library-feed", "library-search", "queue-list", "queue-cover",
+    }
+    if req.command not in allowed_commands:
+        raise HTTPException(
+            status_code=400,
+            detail=f"command must be one of: {', '.join(sorted(allowed_commands))}",
+        )
+
+    options = {}
+    if req.optionsJson:
+        try:
+            options = json.loads(req.optionsJson)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"optionsJson must be valid JSON: {exc.msg}") from exc
+        if not isinstance(options, dict):
+            raise HTTPException(status_code=400, detail="optionsJson must contain a JSON object")
+
+    setup_environment()
+    args = [sys.executable, SKILL_PATH]
+    if req.command == "doctor":
+        args.append("doctor")
+        if options.get("json"):
+            args.append("--json")
+        if options.get("cached"):
+            args.append("--cached")
+        if options.get("postmortem"):
+            args.append("--postmortem")
+        if options.get("probe"):
+            args.append("--probe")
+    elif req.command == "diagnose":
+        args.append("--diagnose")
+    elif req.command == "preflight":
+        args.append("--preflight")
+    elif req.command == "drill":
+        if not req.topic or not req.topic.strip():
+            raise HTTPException(status_code=400, detail="topic is required for drill")
+        args.extend(["--drill", req.topic.strip()])
+    elif req.command == "library-feed":
+        args.extend(["library", "feed"])
+    elif req.command == "library-search":
+        query = str(options.get("query") or req.topic or "").strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="query is required for library-search")
+        args.extend(["library", "search", query])
+    elif req.command == "queue-list":
+        args.extend(["queue", "list"])
+    elif req.command == "queue-cover":
+        if not req.topic or not req.topic.strip():
+            raise HTTPException(status_code=400, detail="topic is required for queue-cover")
+        args.extend(["queue", "cover", req.topic.strip()])
+
+    option_flags = {
+        "emit": "--emit", "saveDir": "--save-dir", "saveSuffix": "--save-suffix",
+        "search": "--search", "days": "--days", "asOf": "--as-of",
+        "webBackend": "--web-backend", "xHandle": "--x-handle",
+        "githubUser": "--github-user", "githubRepo": "--github-repo",
+    }
+    for key, flag in option_flags.items():
+        value = options.get(key)
+        if value is not None and value != "":
+            args.extend([flag, str(value)])
+    for key, flag in {
+        "quick": "--quick", "deep": "--deep", "mock": "--mock",
+        "store": "--store", "verifyFreshness": "--verify-freshness",
+        "noVerifyFreshness": "--no-verify-freshness", "autoResolve": "--auto-resolve",
+    }.items():
+        if options.get(key):
+            args.append(flag)
+
+    try:
+        result = subprocess.run(args, text=True, capture_output=True, timeout=300)
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="last30days command timed out after 300 seconds") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "skill command failed").strip()
+        raise HTTPException(status_code=502, detail=detail)
+    return {"stdout": result.stdout, "stderr": result.stderr, "command": req.command}
