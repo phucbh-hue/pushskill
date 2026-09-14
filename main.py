@@ -120,20 +120,22 @@ def run_discovery(req: DiscoveryRequest):
     if req.action not in {"nominate", "research", "finalize"}:
         raise HTTPException(status_code=400, detail="action must be nominate, research, or finalize")
     setup_environment()
-    topic_str = shlex.quote(req.topic or "")
+    discover_arg = "--discover"
+    if req.topic and req.topic.strip():
+        discover_arg += f" {shlex.quote(req.topic.strip())}"
     
     if req.action == "nominate":
-        cmd = f'{shlex.quote(sys.executable)} {shlex.quote(SKILL_PATH)} --discover --nominate-only {topic_str} --save-dir={shlex.quote(SAVE_DIR)}'
+        cmd = f'{shlex.quote(sys.executable)} {shlex.quote(SKILL_PATH)} {discover_arg} --nominate-only --save-dir={shlex.quote(SAVE_DIR)}'
     elif req.action == "research":
         j_file = "/tmp/last30days_judgments.json"
         with open(j_file, "w") as f:
             f.write(req.judgmentsJson or "")
-        cmd = f'{shlex.quote(sys.executable)} {shlex.quote(SKILL_PATH)} --discover --judgments {shlex.quote(j_file)} {topic_str} --save-dir={shlex.quote(SAVE_DIR)}'
+        cmd = f'{shlex.quote(sys.executable)} {shlex.quote(SKILL_PATH)} {discover_arg} --judgments {shlex.quote(j_file)} --save-dir={shlex.quote(SAVE_DIR)}'
     elif req.action == "finalize":
         a_file = "/tmp/last30days_angles.json"
         with open(a_file, "w") as f:
             f.write(req.anglesJson or "")
-        cmd = f'{shlex.quote(sys.executable)} {shlex.quote(SKILL_PATH)} --discover --finalize --angles {shlex.quote(a_file)} {topic_str} --save-dir={shlex.quote(SAVE_DIR)}'
+        cmd = f'{shlex.quote(sys.executable)} {shlex.quote(SKILL_PATH)} {discover_arg} --finalize --angles {shlex.quote(a_file)} --save-dir={shlex.quote(SAVE_DIR)}'
     p = subprocess.run(cmd, shell=True, text=True, capture_output=True)
     if p.returncode != 0:
         raise HTTPException(status_code=502, detail=(p.stderr or p.stdout or "skill command failed").strip())
