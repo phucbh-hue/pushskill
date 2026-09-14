@@ -8,6 +8,8 @@ import sys
 
 app = FastAPI(title="Last30Days Skill Bridge API")
 
+os.environ["PATH"] = os.path.expanduser("~/.local/bin") + os.pathsep + os.environ.get("PATH", "")
+
 REPO_URL = "https://github.com/mvanhorn/last30days-skill.git"
 DATA_DIR = os.environ.get("PUSHSKILL_DATA_DIR", "/tmp/pushskill")
 SKILL_DIR = os.path.join(DATA_DIR, "skills", "last30days-skill")
